@@ -1,0 +1,214 @@
+# Phase 4: Sales Tools, Estimator & Lead Generation
+
+**Priority:** MEDIUM-HIGH — Revenue expansion and competitive differentiation
+**Dependency:** Phase 1 (catalog) + Phase 3 (embed operational)
+**Timeline:** Months 7–12
+**Stack:** Next.js 14 · Prisma · SendGrid/SES · CRM Webhooks · PDF Generation
+**Dev Server:** `npm run dev` — runs at **http://localhost:5000**
+
+> **The differentiator:** WhyFire's estimator exists separately from their catalog browse experience. Ours is unified — same catalog, same login, same source of truth. The consumer who explores products also uses the estimator, and the resulting lead routes directly to the dealer's CRM.
+
+---
+
+## Plan 4-A: Pricing Configuration & Estimator Engine
+*Target: Admin and dealer pricing setup + the calculation core*
+
+### Objective
+Before a consumer can generate an estimate, dealers must configure their pricing structure. This plan builds the pricing data layer and the server-side estimate calculation engine that all estimator UIs share.
+
+### Current State
+- `Estimate` and `EstimateItem` Prisma models exist
+- `Product.priceMap` and `Product.priceMsrp` fields exist for catalog prices
+- `EstimateStatus` enum: DRAFT, SENT, VIEWED, CONVERTED, EXPIRED
+
+### Remaining Work
+
+#### [NEW] Dealer Pricing Configuration `/portal/settings/pricing`
+- **Product price override:** Dealers can set custom sell price per product (overrides MAP/MSRP from catalog)
+- **Labor rate configuration:** Set base labor rate ($/hr), and per-project-type labor tables (e.g., gas fireplace install = 8 hrs)
+- **Markup/margin settings:** Apply a default markup % on top of catalog MAP prices
+- **Accessory pricing:** Add custom line items (venting kit, surround, mantel) with price and item type
+- Saved to a new `DealerPricingConfig` model (JSON in `DealerAccount.settings` or dedicated table)
+
+#### [NEW] Estimate Calculation Engine `src/lib/estimator.ts`
+- Input: `{ dealerId, productId, projectType, selectedAccessories[], laborOverride? }`
+- Logic:
+  1. Resolve product price: dealer custom price → MAP → MSRP
+  2. Apply dealer markup if configured
+  3. Look up labor cost: base rate × hours for `projectType`
+  4. Sum all selected accessory line items
+  5. Return: `{ lineItems[], subtotal, laborCost, totalEstimate, priceRange: { low, high } }`
+- Price range: ±15% variance on labor to give consumer a realistic range rather than a single number
+- Fully server-side — called by both consumer embed endpoint and employee tool
+
+#### [NEW] API route `/api/estimates` `POST`
+- Accepts estimate input, calls `estimator.ts`, persists `Estimate` + `EstimateItem[]` records
+- Returns estimate ID for PDF generation and sharing
+- Auth: dealer session (for employee tool) OR public dealer token (for consumer embed)
+
+#### [NEW] API route `/api/estimates/[id]` `GET` `PATCH`
+- `GET`: Return full estimate with line items (for PDF, view, edit)
+- `PATCH`: Update status (`SENT`, `VIEWED`, `CONVERTED`, `EXPIRED`)
+
+### Verification
+1. Set up pricing config for a test dealer (custom price on 2 products, labor rate $95/hr, 8hr install)
+2. `POST /api/estimates` with a gas fireplace productId and `projectType = "gas_retrofit"` → verify response includes correct line items: product price at dealer rate, labor = 8 × $95 = $760, total correct
+3. Rerun with the same input but no custom dealer price set → verify MAP price is used as fallback
+4. `GET /api/estimates/[id]` → verify all line items and subtotals match
+
+---
+
+## Plan 4-B: Consumer Estimator Embed
+*Target: The consumer-facing, guided estimate tool on the dealer's website*
+
+### Objective
+A step-by-step guided tool — embedded on the dealer's website alongside the catalog widget — that walks a homeowner through qualifying questions, narrows product options, builds an estimate, and captures their info as a lead.
+
+### Remaining Work
+
+#### [NEW] Consumer Estimator Widget `src/widget/estimator/`
+- Separate lightweight JS bundle: `hearth-estimator.js`
+- Embedded via:
+  ```html
+  <script 
+    src="https://cdn.hearth.io/widget/hearth-estimator.js"
+    data-dealer-token="abc123">
+  </script>
+  ```
+- **Step 1 — Qualifying Questions:**
+  - Project type: New construction / Retrofit / Replacement
+  - Space type: Living room / Bedroom / Outdoor / Other
+  - Fuel type preference: Gas / Wood / Electric / Not sure
+  - Room size (sq ft): slider (< 500 / 500–1000 / 1000–2000 / > 2000)
+  - Venting: Has existing chimney / No chimney / Not sure
+- **Step 2 — Product Recommendations:**
+  - Calls `/api/widget/[token]/products` with derived filters (fuel type, venting, BTU estimate from sq ft)
+  - Shows top 3–5 matching products from dealer's active catalog
+  - Consumer selects one
+- **Step 3 — Options & Accessories:**
+  - Display dealer-configured accessories (surround, mantel, venting kit) as optional add-ons
+  - Each add-on shows price; toggle on/off
+- **Step 4 — Estimate Summary:**
+  - Calls `POST /api/widget/[token]/estimate` (thin public proxy to `/api/estimates`)
+  - Shows itemized breakdown: product, accessories, labor, total range
+  - "Get My Estimate" — reveals lead capture form
+- **Step 5 — Lead Capture & PDF Delivery:**
+  - Form: name, email, phone, address, notes
+  - On submit: creates `Lead` record linked to estimate; triggers PDF generation and email delivery
+
+#### [NEW] PDF Estimate Generation `src/lib/pdf.ts`
+- Generate branded PDF estimate using `@react-pdf/renderer` or `puppeteer`
+- Include: dealer logo, consumer info, product details + image, line items, total range, disclaimer
+- Upload to Supabase Storage; store URL on `Estimate.pdfUrl`
+- Email to consumer AND dealer via SendGrid/SES with PDF attached
+
+#### [MODIFY] Widget Config Builder `/portal/widget`
+- Add "Enable Estimator" toggle
+- Add CTA button text configuration (e.g., "Get a Free Project Estimate")
+- Estimator tab: set which accessories appear, default labor rate message to show consumers
+
+### Verification
+1. Embed `hearth-estimator.js` on a test HTML page
+2. Walk through all 5 steps: select project type, pick a product, add an accessory, view estimate, submit lead form
+3. Verify `Estimate` record created in DB with correct line items and total
+4. Verify `Lead` record created, linked to estimate, with `source = "estimator"`
+5. Verify PDF is generated, uploaded to storage, and received by email at the test consumer address
+6. Verify dealer also receives notification email with lead details and PDF
+
+---
+
+## Plan 4-C: Employee In-Store Estimate Tool
+*Target: The same estimator logic, used by dealer sales staff for walk-in customers*
+
+### Objective
+Sales staff at a dealer can build estimates on behalf of walk-in customers using the same product catalog and pricing engine — from within the Client Portal. Estimates can be emailed to customers and tracked in a sales pipeline.
+
+### Remaining Work
+
+#### [NEW] Portal — Estimate Builder `/portal/estimates/new`
+- **Product search:** Full-text search across dealer's active catalog; select a fireplace product
+- **Accessories:** Same add-on options as consumer estimator, pre-populated from dealer's pricing config
+- **Customer info:** Form with name, email, phone, address, project notes
+- **Labor override:** Staff can manually adjust labor hours or enter a flat labor dollar amount
+- **Estimate preview:** Live-updating total as items are added/removed
+- **Send to Customer:** Button → generates PDF and emails to customer; sets `Estimate.status = SENT`
+
+#### [NEW] Portal — Estimates List `/portal/estimates`
+- Table of all estimates: customer name, product, total, status badge (Draft / Sent / Viewed / Converted / Expired)
+- Filter by status, date range, product/brand
+- Click to open/edit a draft or view a sent estimate
+- "Convert to Sale" action → sets `Estimate.status = CONVERTED`, prompts to link to a lead
+
+#### [NEW] Portal — Lead Pipeline `/portal/leads`
+- All `Lead` records for the dealer (from widget, estimator, and employee tool)
+- Kanban or table view with `LeadStatus` stages: New → Contacted → Qualified → Proposal Sent → Won / Lost
+- Drag-and-drop status update
+- Lead detail: consumer info, product interest, estimate amount, CRM sync status, notes
+- Manual "Add Lead" form for phone/walk-in leads
+
+#### [MODIFY] API — Estimate Endpoints (auth)
+- All portal-side estimate calls require dealer session auth
+- `GET /api/portal/estimates` — paginated list for current dealer
+- `POST /api/portal/estimates` — create draft from employee tool
+- `PATCH /api/portal/estimates/[id]` — update, send, convert
+- `GET /api/portal/leads` — paginated lead list
+- `PATCH /api/portal/leads/[id]` — update status, add notes
+
+### Verification
+1. Log in as dealer; go to `/portal/estimates/new` → build an estimate by searching for a product
+2. Add an accessory, adjust labor hours → verify total updates correctly
+3. Enter customer info, click "Send to Customer" → verify email received with PDF, Estimate status → SENT
+4. Go to `/portal/estimates` → verify the estimate appears with SENT badge
+5. Mark the estimate as Converted → verify status updates in DB and estimate appears linked to lead
+6. Check `/portal/leads` → verify lead appears with correct status, linked estimate, and product
+
+---
+
+## Plan 4-D: CRM Integration & Lead Pipeline Automation
+*Target: Automatically push leads to dealer CRMs; unlock the feature WhyFire locks behind enterprise*
+
+### Objective
+Every lead captured — whether via the catalog widget, consumer estimator, or manual entry — is automatically pushed to the dealer's CRM. This is available at Professional tier and above, via webhook at all tiers. WhyFire makes this enterprise-only; we win on accessibility.
+
+### Current State
+- `CrmIntegration` Prisma model exists: `provider`, `isActive`, `credentials`, `webhookUrl`, `fieldMapping`, `lastSyncAt`
+- `Lead.crmSyncedAt` and `Lead.crmExternalId` fields exist for tracking sync status
+
+### Remaining Work
+
+#### [NEW] Portal — CRM Integration Setup `/portal/settings/crm`
+- Select CRM provider: HubSpot / Salesforce / Jobber / ServiceTitan / Custom Webhook
+- **Webhook (all tiers):** Enter webhook URL; Hearth POSTs lead JSON on every new lead
+- **HubSpot (Professional+):** OAuth connect flow → store access token in `CrmIntegration.credentials` (encrypted)
+- **Salesforce / Jobber / ServiceTitan:** OAuth or API key flows (detailed per-provider)
+- **Field Mapping UI:** Map Hearth lead fields to CRM contact/deal fields using a drag-and-drop or dropdown mapper
+- Test connection button: sends a test payload and verifies response
+
+#### [NEW] Lead Sync Service `src/lib/crm/`
+- Runs after every new `Lead` record is created
+- Checks dealer's `CrmIntegration`: if active, dispatch to provider-specific handler:
+  - **Webhook:** `POST webhookUrl` with lead JSON payload
+  - **HubSpot:** Create/update Contact + Deal via HubSpot API v3
+  - **Salesforce:** Create Lead record via Salesforce REST API
+  - **Jobber / ServiceTitan:** Create client/request via respective APIs
+- On success: set `Lead.crmSyncedAt = now()`, `Lead.crmExternalId = <CRM record ID>`
+- On failure: log error, retry up to 3× with backoff; surface failure in dealer activity log
+
+#### [NEW] Automated Follow-Up Sequences
+- From `/portal/settings/automation`:
+  - Configure a sequence: "Send follow-up email 24h after lead captured if not contacted"
+  - Set email template (subject + body with merge tags: `{{firstName}}`, `{{productName}}`, `{{dealerName}}`)
+  - Enable/disable per lead source (widget / estimator)
+- `Lead.status` change to CONTACTED clears the follow-up queue for that lead
+
+#### [NEW] API route `/api/portal/crm/test` `POST`
+- Sends a synthetic test lead to the dealer's configured CRM integration
+- Returns success/error for the connection test UI
+
+### Verification
+1. Configure a webhook in `/portal/settings/crm` pointing to a [webhook.site](https://webhook.site) test URL
+2. Submit a lead via the consumer widget → verify webhook receives correct JSON payload within 5 seconds
+3. Connect HubSpot OAuth → submit another lead → verify a new HubSpot Contact is created with matching email and `dealerName` as Company
+4. Check `/portal/leads` → verify `crmSyncedAt` timestamp is populated for synced leads; CRM external ID is shown
+5. Simulate a CRM failure (invalid URL) → verify retry logic fires (check logs), activity log records the failure
+6. Configure a 24h follow-up email; create a test lead; manually advance system clock (or trigger follow-up manually in dev) → verify email is sent with correct merge tag content

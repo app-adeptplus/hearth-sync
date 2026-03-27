@@ -1,0 +1,190 @@
+# Phase 3: Website Embed / Streaming Catalog
+
+**Priority:** HIGH — This is the revenue-generating product
+**Dependency:** Phase 1 (catalog data) + Phase 2 (dealer has configured their selection)
+**Stack:** Next.js 14 · Public REST API · Vanilla JS Widget · Cloudflare CDN
+**Dev Server:** `npm run dev` — runs at **http://localhost:5000**
+
+> **The core value prop:** A dealer adds one `<script>` tag and their always-current, Hearth-powered product catalog is live on their existing website — no rebuilds, no manual updates.
+
+---
+
+## Plan 3-A: Embed API & Public Product Endpoints
+*Target: Build the public-facing API that the widget calls to stream catalog data*
+
+### Objective
+Create fast, public, cacheable API endpoints that the embedded widget queries to display the dealer's curated product catalog. These endpoints power every consumer-facing feature.
+
+### Current State
+- `/api/widget` directory exists in the project with 2 children — likely a start on widget API routes
+- `WidgetConfig` Prisma model exists (colors, fonts, layout, embed code, `isActive`)
+- `DealerCatalogSelection` stores which products each dealer has active
+
+### Remaining Work
+
+#### [MODIFY/NEW] Public API `/api/widget/[dealerToken]/products`
+- **Auth:** Bearer token or public dealer token (stored on `WidgetConfig`) — no Supabase session required
+- **Returns:** Paginated product list for the dealer's active selections
+- **Filters (query params):** `fuelType`, `category`, `brand`, `priceMin`, `priceMax`, `search`, `page`, `pageSize`
+- **Response shape per product:** `id`, `name`, `modelNumber`, `slug`, `primaryImageUrl`, `fuelType`, `category`, `priceMap`, `priceMsrp`, `status`, `brand.name`, `manufacturer.name`
+- **Caching:** Add `Cache-Control` headers; results cached at Cloudflare edge by dealer token + query params
+
+#### [NEW] Public API `/api/widget/[dealerToken]/products/[productSlug]`
+- Full product detail: all images (sorted), all specs (grouped), all documents (links), full description
+- Include Schema.org JSON-LD in response metadata for SEO (consumed by SSR option)
+
+#### [NEW] Public API `/api/widget/[dealerToken]/config`
+- Returns `WidgetConfig` for a dealer token: colors, fonts, layout, feature flags (`showPricing`, `showComparison`, `showFavorites`)
+- Cached aggressively (5-minute TTL); invalidated when dealer updates config in portal
+
+#### [NEW] Public API `/api/widget/[dealerToken]/lead` `POST`
+- Accept lead capture form submission
+- Create `Lead` record linked to dealer + optional product
+- Trigger dealer notification (email)
+- No auth required (public endpoint) — rate-limited by IP
+
+### Verification
+1. Generate a dealer token for a test dealer via admin
+2. Call `GET /api/widget/[token]/products` → verify paginated results only include dealer's active products
+3. Call with `?fuelType=GAS` → verify filter is applied correctly
+4. Call `GET /api/widget/[token]/products/[slug]` → verify full product detail including all images and specs
+5. `POST /api/widget/[token]/lead` with test data → verify `Lead` record created in DB, dealer email received
+
+---
+
+## Plan 3-B: Embeddable Widget Build
+*Target: The lightweight JavaScript widget that dealers drop on their site*
+
+### Objective
+Build a self-contained, framework-agnostic JavaScript widget that calls the embed API and renders the dealer's product catalog inline on any website — WordPress, Squarespace, custom HTML, etc.
+
+### Current State
+- `src/widget/` directory exists (3 children) — a widget build skeleton exists
+
+### Remaining Work
+
+#### [MODIFY] `src/widget/` — Widget Bundle
+- Build with **Vanilla JS + Web Components** (no React dependency — keeps bundle tiny)
+- Single entry point: `hearth-catalog.js`
+- Initialization: reads `data-dealer-token` and optional config overrides from the script tag:
+  ```html
+  <script 
+    src="https://cdn.hearth.io/widget/hearth-catalog.js"
+    data-dealer-token="abc123"
+    data-container="#hearth-catalog">
+  </script>
+  ```
+- Fetches `/api/widget/[token]/config` on init → applies dealer's colors/fonts as CSS custom properties
+- Renders catalog grid into the specified container element
+
+#### Widget UI Components (Vanilla JS / Shadow DOM)
+- **Product Grid:** Responsive CSS grid (3 cols desktop, 2 tablet, 1 mobile)
+- **Filter Sidebar / Top Bar:** Fuel type, category, brand checkboxes; price range slider; search input
+- **Product Card:** Primary image (lazy loaded), name, model, brand, fuel type badge, price (if `showPricing`)
+- **Product Detail Modal / Page:** Full image carousel, specs accordion, document download links, lead capture CTA
+- **Comparison Drawer:** Side-by-side spec comparison (if `showComparison` enabled, up to 3 products)
+- **Favorites:** Save to localStorage with share-by-link option (if `showFavorites` enabled)
+
+#### [NEW] Widget Config Builder `/portal/widget`
+- Live preview of the widget with dealer's branding
+- Color pickers for primary / secondary / accent
+- Font selector (from Google Fonts subset)
+- Layout toggle (grid / list)
+- Feature toggles: show pricing, comparison, favorites
+- Copy embed code button — generates `<script>` tag with dealer token
+- Save → updates `WidgetConfig` + invalidates Cloudflare cache for that dealer token
+
+### Verification
+1. Build widget bundle: `npm run build:widget` → verify `hearth-catalog.js` outputs to `/public/widget/`
+2. Create a test HTML page with the script tag and a test dealer token
+3. Open in browser → verify catalog loads with dealer's active products and branding colors
+4. Apply fuel type filter → verify results update without page reload
+5. Click a product → verify detail modal opens with all images and specs
+6. Submit lead form → verify `Lead` record created in DB
+7. Open on both mobile and desktop viewport → verify responsive layout works correctly
+
+---
+
+## Plan 3-C: Consumer-Facing Features
+*Target: Product comparison, favorites, sharing, and lead capture*
+
+### Objective
+The consumer experience inside the widget needs to convert visitors into leads. This plan builds the interactive features that make the catalog feel like a premium product tool, not just a product list.
+
+### Remaining Work
+
+#### Feature: Product Comparison
+- "Add to Compare" button on each product card (disabled after 3 selected)
+- Floating comparison tray showing selected products (up to 3) with a "Compare" CTA
+- Comparison view: side-by-side spec table, highlight differences in yellow
+- All data read from the public `/api/widget/[token]/products/[slug]` endpoint
+
+#### Feature: Favorites
+- Heart icon on each product card
+- Selected favorites stored in `localStorage` (no login required for consumer)
+- Favorites page / panel: shows saved products
+- **Share Favorites:** Generate a shareable link encoding favorite product IDs as URL params; opens same widget view pre-filtered to those products
+
+#### Feature: Lead Capture
+- "Get a Quote" / "Learn More" CTA on every product detail page
+- **Lead form fields:** First name, last name, email, phone, project type (dropdown), message
+- Pre-fills product name in the message if triggered from a product detail
+- On submit: `POST /api/widget/[token]/lead` → success confirmation message
+- Configurable CTA text via `WidgetConfig` (e.g., "Request a Quote", "Contact Us")
+
+#### Feature: Product Search
+- Real-time search input calls `/api/widget/[token]/products?search=query` with debounce (300ms)
+- Highlights search term in product name/model results
+- "No results" state with "Browse All" fallback
+
+### Verification
+1. Select 3 products via "Add to Compare" → verify comparison drawer opens and side-by-side spec table renders
+2. Add a product to favorites → refresh page → verify it persists in `localStorage`
+3. Click "Share Favorites" → copy the generated link and open in a new tab → verify the same products are pre-selected
+4. Submit lead form on a product → verify DB record includes `productId`, dealer receives email with product name in body
+5. Type in search box → verify results filter within 300–500ms with no manual page reload
+
+---
+
+## Plan 3-D: SEO, Performance & Analytics
+*Target: Make the embedded catalog discoverable by search engines and blazing fast*
+
+### Objective
+The widget must not hurt the dealer's SEO and ideally improves it. Product pages need to be indexable by Google, images need to load fast globally, and the widget footprint must be minimal.
+
+### Remaining Work
+
+#### SEO — Server-Side Rendering Option
+- For dealers who want SEO benefit, offer an **iframe SSR mode** as an alternative to the JS widget
+- New Next.js route `/embed/[dealerToken]` — server-renders full catalog HTML
+- Dealer embeds via `<iframe src="https://catalog.hearth.io/embed/[token]">` with `loading="lazy"`
+- Validate approach with SEO stakeholder (Emily, per roadmap note) before full build
+
+#### SEO — Schema.org Structured Data
+- Every product in the widget emits `<script type="application/ld+json">` with `Product` schema:
+  - `name`, `brand`, `image`, `description`, `offers` (price), `productID` (model number)
+- In SSR mode, this is included in the initial HTML response
+
+#### Performance — CDN & Asset Delivery
+- Host `hearth-catalog.js` bundle on Cloudflare CDN (`cdn.hearth.io/widget/`)
+- All `ProductImage` URLs served via Cloudflare Images or R2 with transformation support (resize/WebP conversion)
+- Widget bundle target: **< 80KB gzipped**
+- Images: lazy-loaded with Intersection Observer; WebP with JPEG fallback
+
+#### Performance — API Caching
+- Cloudflare KV or Cache API for dealer product lists (5-min TTL)
+- Cache invalidation webhook: when dealer selection changes → purge Cloudflare cache for that dealer token
+- Stale-while-revalidate pattern for near-instant load on repeat visits
+
+#### Analytics
+- Widget emits events to a lightweight analytics endpoint:
+  - `page_view` (catalog loaded), `product_view`, `lead_submitted`, `comparison_used`, `favorites_used`
+- `POST /api/widget/[token]/analytics` — stores aggregated event counts (no PII)
+- Admin dashboard shows widget usage stats per dealer
+
+### Verification
+1. Open widget page with `curl` (no JS) while in SSR mode → verify product HTML is present in the response body
+2. Run Lighthouse on a test page with the widget → target score: Performance > 85, no SEO warnings
+3. Check browser DevTools Network tab → verify `hearth-catalog.js` is served from Cloudflare (`cdn.hearth.io`), not origin
+4. Verify Schema.org output: paste a product page URL into [Google Rich Results Test](https://search.google.com/test/rich-results) → confirm `Product` schema detected
+5. Update dealer's catalog selection → trigger cache purge → confirm updated product list appears on next widget load (within 30s)

@@ -1,0 +1,79 @@
+# Phase 2: Client Operations Portal
+
+**Priority:** HIGH — Required before commercial launch
+**Dependency:** Phase 1 (partial — manufacturers and products must exist in the catalog)
+**Stack:** Next.js 14 App Router · Prisma · Supabase Auth · TypeScript
+**Dev Server:** `npm run dev` — runs at **http://localhost:5000**
+**Deployment:** Vercel (serverless)
+
+> **Context:** WhyFire's biggest weakness is zero dealer self-service. This portal is our differentiator — full catalog control, real-time change visibility, and account management pulled from our Airtable client DB.
+
+---
+
+## Plan 2-A: Dealer Account Auth & Onboarding ✅ LARGELY COMPLETE
+*Target: Dealer sign-in, account creation, and protected portal access*
+
+### What's Done
+- `DealerAccount` Prisma model linked to Supabase `userId` with slug-based portal routing
+- `src/middleware.ts` handles Supabase session checks and route protection
+- Login page at `/dealer/[slug]/login` with email/password via Supabase Auth
+- Dealer portal layout at `/dealer/[slug]/layout.tsx` — session-aware with sidebar nav
+- Admin user management at `/admin/dealer-portal/users` with invite modal and edit modal
+- API routes: `/api/admin/users` (list/create), `/api/admin/users/[id]` (update/delete)
+- `/api/dealer/[slug]/settings/users` for dealer-scoped user management
+- Auth utility functions in `src/lib/auth-utils.ts`
+- `DealerHeaderUser.tsx` component for dealer portal header with user info
+- Role-based access (admin vs dealer) via Supabase user metadata
+
+### Remaining Work
+- [ ] Forgot Password page (`/forgot-password`) — Supabase magic link / reset flow
+- [ ] First-time welcome/setup page for newly provisioned dealers
+- [ ] Email notification on invite (SendGrid/SES integration)
+- [ ]
+---
+
+## Plan 2-B: Catalog Selection Interface — Not Started
+*Target: Dealers browse and activate manufacturers/products for their site*
+
+### What's Done
+- `DealerCatalogSelection` Prisma model exists (`dealerId`, `productId`, `isActive`, `status`)
+- `DealerCatalogGroup` and `DealerCatalogGroupProduct` models exist for custom grouping
+
+### Remaining Work
+- [ ] Portal — Catalog by Manufacturer (`/portal/catalog`) — browsable manufacturer list with activation toggles
+- [ ] Portal — Product Browser (`/portal/catalog/[manufacturerSlug]`) — filterable grid with per-product toggles
+- [ ] API routes for catalog selection (bulk activate/deactivate, manufacturer toggle)
+- [ ] Auto-log selection changes to `DealerActivityLog`
+
+---
+
+## Plan 2-C: Activity Log & Change Feed — Not Started
+*Target: Real-time visibility into every catalog change — our biggest WhyFire differentiator*
+
+### What's Done
+- `DealerActivityLog` Prisma model exists with `type`, `title`, `message`, `metadata`, `isRead`
+- ScraperEngine writes `AuditLog` entries on product changes (foundation for fan-out)
+
+### Remaining Work
+- [ ] Dealer Notification Fan-Out service — after scraper sync, create `DealerActivityLog` entries for affected dealers
+- [ ] Portal Activity Feed page (`/portal/activity`) — chronological feed with filters and action buttons
+- [ ] API routes for activity feed (list, mark read, take action)
+- [ ] Sync Status Widget — per-manufacturer last sync time + status indicator
+
+---
+
+## Plan 2-D: Dashboard, Notifications & Airtable Integration — Partially Started
+*Target: Summary dashboard, configurable email alerts, and Airtable client DB sync*
+
+### What's Done
+- Dealer settings page at `/dealer/[slug]/settings` — account details, password change
+- `src/lib/airtable.ts` — Airtable client utility exists
+- `src/lib/crmConnector.ts` — CRM connector stub (HubSpot/Salesforce placeholders)
+- `src/lib/emailService.ts` — Email service stub exists
+
+### Remaining Work
+- [ ] Portal Dashboard (`/portal/dashboard`) — stats cards, recent activity, sync health panel
+- [ ] Notification settings UI — email toggles per event type, frequency preference
+- [ ] Notification email system — SendGrid/SES templates for digests and alerts
+- [ ] Airtable sync endpoint (`/api/admin/airtable-sync`) — read client records, match/create DealerAccount records
+- [ ] Admin "Sync from Airtable" button
